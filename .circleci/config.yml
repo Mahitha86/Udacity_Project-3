@@ -1,0 +1,612 @@
+version: 2.1
+
+orbs:
+  slack: circleci/slack@4.4.2
+  jq: circleci/jq@2.2.0
+
+commands:
+  destroy-environment:
+    description: Destroy backend and frontend cloudformation stacks given a workflow ID.
+    steps:
+      - run:
+          name: Delete S3 content
+          when: on_fail
+          command: |
+            aws s3 rm s3://udapeople-${CIRCLE_WORKFLOW_ID:0:7} --recursive
+            exit 0
+
+      - run:
+          name: Destroy environments
+          when: on_fail
+          command: |
+            aws cloudformation delete-stack --stack-name backend-${CIRCLE_WORKFLOW_ID:0:7}
+            aws cloudformation delete-stack --stack-name frontend-${CIRCLE_WORKFLOW_ID:0:7}
+            exit 0
+
+  extract-commit-message:
+    description: Extract commit message
+    steps:
+      - run:
+          name: Extract commit message
+          when: always
+          command: |
+            echo "export COMMIT_MESSAGE=\"$(git log --format=%B -n 1 $CIRCLE_SHA1)\"" >> $BASH_ENV
+            source $BASH_ENV
+
+  slack-notification-fail:
+    description: Send notification to Slack
+    steps:
+      - extract-commit-message
+
+      - slack/notify:
+          channel: udapeople
+          event: fail
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                      "type": "mrkdwn",
+                      "text": "Your job *$CIRCLE_JOB* has *faild* :octagonal_sign: (<$CIRCLE_BUILD_URL|build #$CIRCLE_BUILD_NUM>)\n\nrepo: $CIRCLE_REPOSITORY_URL\n\nbranch: $CIRCLE_BRANCH\n\ncommitter: $CIRCLE_USERNAME\n\ncommit message: $COMMIT_MESSAGE"
+                  }
+                }
+              ]
+            }
+  slack-notification-pass:
+    description: Send notification to Slack
+    steps:
+      - extract-commit-message
+
+      - slack/notify:
+          channel: udapeople
+          event: pass
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                      "type": "mrkdwn",
+                      "text": "Your job *$CIRCLE_JOB* has *built* :white_check_mark: (<$CIRCLE_BUILD_URL|build #$CIRCLE_BUILD_NUM>)\n\nrepo: $CIRCLE_REPOSITORY_URL\n\nbranch: $CIRCLE_BRANCH\n\ncommitter: $CIRCLE_USERNAME\n\ncommit message: $COMMIT_MESSAGE"
+                  }
+                }
+              ]
+            }
+  revert-migrations:
+    description: Revert the last migration if successfully run in the current workflow.
+      #parameters:
+    # Add parameter here
+    steps:
+      - restore_cache:
+          key: v1-backend-build
+          
+      - run:
+          name: Revert migrations
+          when: on_fail
+          command: |
+            # Curl command here to see if there was a successful migration associated with the workflow id, store result in SUCCESS variable
+            SUCCESS=`curl -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request GET https://api.memstash.io/values/migration_${CIRCLE_WORKFLOW_ID}`
+            if [[ $SUCCESS == 1 ]];
+            then
+              cd ~/project/backend
+              npm install
+              # revert migration
+              npm run migrations:revert
+            fi
+
+jobs:
+  build-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+          name: Install dependencies
+          command: | 
+            cd ./frontend          
+            npm i
+      - run:
+          name: Build front-end
+          command: |
+            # Your code here
+            cd ./frontend
+            ls -la
+            npm i
+            npm run build
+      - save_cache:
+          paths: [frontend/node_modules]
+          key: frontend-build
+      - slack-notification-fail
+
+  build-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+             cd ./backend
+             npm i            
+      - run:
+          name: Backend build
+          command: |
+            # Your code here
+            cd ./backend
+            ls -la
+            npm i
+            npm run build
+
+      - save_cache:
+          paths: [backend/node_modules]
+          key: backend-build
+      - slack-notification-fail
+      - slack-notification-pass
+
+  test-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Test front-end
+          command: |
+            # Your code here
+            cd ./frontend
+            sudo  npm  install oauth-sign
+            sudo  npm run test
+      - slack-notification-fail 
+      - slack-notification-pass
+
+  test-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: Test Back-end 
+          command: |
+             # Your code here
+             cd ./backend
+             sudo  npm  install oauth-sign
+             sudo  npm run  test
+      - slack-notification-fail 
+      - slack-notification-pass
+
+  scan-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run:
+          name: Run audit of  the frontend
+          command: |
+             # Your code here
+             cd ./frontend
+             npm i
+             npm audit fix --audit-level=critical --force
+      - slack-notification-fail
+      - slack-notification-pass
+
+  scan-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run:
+          name: Run audit of  the backend
+          command: |
+             # Your code here
+             cd ./backend
+             npm i
+             npm audit fix --audit-level=critical 
+      - slack-notification-fail
+      - slack-notification-pass
+
+  deploy-infrastructure:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            curl -sL https://rpm.nodesource.com/setup_12.x | bash -
+            yum -y install nodejs npm tar gzip jq git
+            yum install -y tar gzip
+      - run:
+          name: Ensure back-end infrastructure exists
+          working_directory: ./.circleci/files
+          command: |
+            aws cloudformation deploy \
+              --template-file backend.yml \
+              --stack-name "udapeople-backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --parameter-overrides ID="${CIRCLE_WORKFLOW_ID:0:7}" \
+              --tags project=udapeople-backend-${CIRCLE_WORKFLOW_ID:0:7}
+      - run:
+          name: Ensure front-end infrastructure exist
+          working_directory: ./.circleci/files
+          command: |
+            aws cloudformation deploy \
+              --template-file frontend.yml \
+              --stack-name "udapeople-frontend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --parameter-overrides ID="${CIRCLE_WORKFLOW_ID:0:7}" \
+              --tags project=udapeople-frontend-${CIRCLE_WORKFLOW_ID:0:7}           
+      - run:
+          name: Save backend URL in memstash
+          command: |
+            BACKEND_IP=$(aws ec2 describe-instances \
+              --query 'Reservations[*].Instances[*].PublicIpAddress' \
+              --filters "Name=tag:project,Values=udapeople-backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --output text)
+            curl -H "Content-Type: text/plain" -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request PUT --data "$BACKEND_IP" https://api.memstash.io/values/ec2_back_ip_${CIRCLE_WORKFLOW_ID}
+            echo $BACKEND_IP
+      - run:
+          name: Add back-end ip to ansible inventory
+          working_directory: ./.circleci/ansible
+          command: |
+            echo "[web]" > inventory.txt
+            aws ec2 describe-instances \
+              --query 'Reservations[*].Instances[*].PublicIpAddress' \
+              --filters "Name=tag:project,Values=udapeople-backend-${CIRCLE_WORKFLOW_ID:0:7}" \
+              --output text >> inventory.txt
+            cat inventory.txt
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project/.circleci/ansible/inventory.txt  
+      - slack-notification-fail
+      - slack-notification-pass 
+      - destroy-environment
+
+  configure-infrastructure:
+    docker:
+      - image: python:3.7-alpine3.11
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints: ["88:81:78:1e:c9:ff:c4:16:08:11:c4:66:1c:8c:49:1f"]
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Install dependencies
+          command: |
+            apk add --no-cache \
+              python3 \
+              py3-pip \
+            && pip3 install --upgrade pip \
+            && pip3 install \
+              awscli \
+            && rm -rf /var/cache/apk/*
+            apk add --update ansible
+            apk add --update curl #for slack notify
+            apk add --update jq #for slack notify
+      - run:
+          name: Configure server
+          command: |
+            cd ~/project/.circleci/ansible
+            ls -la
+            cat inventory.txt
+            ansible-playbook -i inventory.txt configure-server.yml           
+      - slack-notification-fail
+      - slack-notification-pass
+      - destroy-environment
+
+  run-migrations:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: awscli install
+          command: |
+            sudo apt-get -y -qq update
+            sudo apt-get -y -qq install python3
+            sudo apt-get -qq install awscli
+      - run:
+          name: envts
+          working_directory: ./backend
+          command: |
+            touch .env
+            echo ENVIROMENT=production > .env
+            echo NODE_ENV=production >> ".env"
+            echo TYPEORM_CONNECTION=postgres >> .env
+            echo TYPEORM_MIGRATIONS_DIR=./src/migrations >> .env
+            echo TYPEORM_ENTITIES=./src/modules/domain/**/*.entity.ts >> .env
+            echo TYPEORM_MIGRATIONS=./src/migrations/*.ts >> .env
+            echo TYPEORM_HOST=$TYPEORM_HOST >> .env
+            echo TYPEORM_PORT=$TYPEORM_PORT >> .env
+            echo TYPEORM_USERNAME=$TYPEORM_USERNAME >> .env
+            echo TYPEORM_PASSWORD=$TYPEORM_PASSWORD >> .env
+            echo TYPEORM_DATABASE=$TYPEORM_DATABASE >> .env
+            ls -latr
+            cat .env
+      - run:
+          name: Run migrations
+          working_directory: ./backend
+          command: |
+            pwd
+            echo "HOST: " $TYPEORM_HOST
+            echo "PWD: " $(pwd)
+            echo $TYPEORM_DATABASE
+            npm install
+            npm run build
+            touch migrationresult.txt
+            npm run migrations:revert
+            npm run migrations >> migrationresult.txt
+            cat migrationresult.txt
+      - run:
+          name: Send migration results to memstash
+          command: |
+            #!/bin/bash
+            cd backend
+            cat migrationresult.txt
+            if [ $(grep -i "has been executed successfully" migrationresult.txt | wc -l) -ge 1 ]
+              then 
+              curl -H "Content-Type: text/plain" -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request PUT --data "Migration Successful" https://api.memstash.io/values/migration_${CIRCLE_WORKFLOW_ID}
+              curl -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request GET https://api.memstash.io/values/migration_${CIRCLE_WORKFLOW_ID}
+              else
+              curl -H "Content-Type: text/plain" -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request PUT --data "Migration Failed" https://api.memstash.io/values/migration_${CIRCLE_WORKFLOW_ID}
+              curl -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request GET https://api.memstash.io/values/migration_${CIRCLE_WORKFLOW_ID}
+            fi
+      - slack-notification-fail
+      - slack-notification-pass 
+      - revert-migrations
+      - destroy-environment
+      
+  deploy-frontend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            sudo apt-get -y -qq update
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+      - attach_workspace:
+          at: .
+      - run:
+          # MUST be http not https
+          name: Get backend url
+          command: |
+            API_IPback=$(curl -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request GET https://api.memstash.io/values/ec2_back_ip_${CIRCLE_WORKFLOW_ID})
+            export API_URL=$(echo "http://$API_IPback:3030")
+            cd frontend
+            echo "${API_URL}" > apiurl.txt
+      - run:
+          name: Deploy frontend objects
+          command: |
+            cd frontend
+            export API_URL=$(cat apiurl.txt)
+            cat apiurl.txt
+            npm i
+            npm run build
+            s3Bucket=$(echo "udapeople-${CIRCLE_WORKFLOW_ID:0:7}")
+            aws s3 sync dist s3://$s3Bucket/
+            s3FullUrl=("http://$s3Bucket.s3-website-eu-west-1.amazonaws.com")
+            curl -H "Content-Type: text/plain" -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request PUT --data "$s3FullUrl" https://api.memstash.io/values/s3bucket_${CIRCLE_WORKFLOW_ID}
+      - persist_to_workspace:
+          root: .
+          paths:
+            - frontend/dist
+      - slack-notification-fail
+      - slack-notification-pass 
+      - destroy-environment
+      - revert-migrations
+  
+  deploy-backend:
+    docker:
+      - image: python:3.7-alpine3.11
+  # Make sure ubuntu is 20.04 in backend.yml or you will have issues with PM2. read .circleci/backend/files for more info
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints:
+            - 88:81:78:1e:c9:ff:c4:16:08:11:c4:66:1c:8c:49:1f
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Install dependencies
+          command: |
+            apk add --update ansible
+            apk add --update tar gzip nodejs npm
+            apk add --update openssh-client
+            apk add --update curl #for slack notify
+            apk add --update jq #for slack notify
+      - run:
+          name: Compress Backend
+          command: |
+            [[ ! -d backend ]] && mkdir backend
+            myenv="backend/.env"
+            echo ENVIROMENT=production > $myenv
+            echo NODE_ENV=production >> $myenv
+            echo TYPEORM_CONNECTION=postgres >> $myenv
+            echo TYPEORM_MIGRATIONS_DIR=./src/migrations >> $myenv
+            echo TYPEORM_ENTITIES=./src/modules/domain/**/*.entity.ts >> $myenv
+            echo TYPEORM_MIGRATIONS=./src/migrations/*.ts >> $myenv
+            echo TYPEORM_HOST=$TYPEORM_HOST >> $myenv
+            echo TYPEORM_PORT=$TYPEORM_PORT >> $myenv
+            echo TYPEORM_USERNAME=$TYPEORM_USERNAME >> $myenv
+            echo TYPEORM_PASSWORD=$TYPEORM_PASSWORD >> $myenv
+            echo TYPEORM_DATABASE=$TYPEORM_DATABASE >> $myenv
+            tar -C backend -czvf artifact.tar.gz .
+            ls -la
+      - run:
+          name: Deploy backend
+          command: |
+            ANSIBLE_HOST_KEY_CHECKING=False
+            pwd
+            cat .circleci/ansible/inventory.txt
+            ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i .circleci/ansible/inventory.txt .circleci/ansible/deploy-backend.yml
+      - slack-notification-fail
+      - slack-notification-pass 
+      - revert-migrations
+      - destroy-environment
+  
+  smoke-test:
+    docker:
+      - image: python:3.7-alpine3.12 
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            apk add --update curl nodejs npm
+            pip install awscli
+            apk add --update tar gzip curl
+            apk add --update curl #for slack notify
+            apk add --update jq #for slack notify
+      - run:
+          name: Backend  Smoke test
+          command: |
+            back_ip=$(curl -H "token: e947093d-4e44-45e0-ba3c-90b26352a021" --request GET https://api.memstash.io/values/ec2_back_ip_${CIRCLE_WORKFLOW_ID})
+            if curl -s "http://$back_ip:3030/api/status" | grep "ok"
+            then
+              echo "Backend alive, Proceeding"
+            else
+              exit 0
+            fi
+      - run:
+          name: Frontend smoke test.
+          command: |
+            front_url=$(curl -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request GET https://api.memstash.io/values/s3bucket_${CIRCLE_WORKFLOW_ID})
+            if curl -s ${front_url} | grep "Welcome"
+            then
+              echo "Frontend alive"
+            else
+              exit 0
+            fi
+      - slack-notification-fail
+      - slack-notification-pass 
+      - revert-migrations
+      - destroy-environment
+
+  cloudfront-update:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            curl -sL https://rpm.nodesource.com/setup_12.x | bash -
+            yum -y install nodejs npm tar gzip jq git
+            yum install -y tar gzip
+            yum install -y tar gzip curl
+            yum install -y nodejs
+      - run:
+          name: Get old stack workflow id
+          command: |
+            # your code here
+            OldWorkflowID=$(aws cloudformation \
+                          list-exports --query "Exports[?Name==\`WorkflowID\`].Value" \
+                          --no-paginate --output text | tr -d '\n')
+            curl -H "Content-Type: text/plain" -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request PUT --data "${OldWorkflowID}" https://api.memstash.io/values/OldWorkflowID_${CIRCLE_WORKFLOW_ID:0:7}
+      - run:
+          name: Update cloudfront distribution
+          working_directory: ./.circleci/files
+          command: |
+            echo "Update CloudFront"
+            aws cloudformation deploy \
+              --template-file cloudfront.yml \
+              --stack-name udapeople-prod \
+              --parameter-overrides WorkflowID="${CIRCLE_WORKFLOW_ID:0:7}" \
+              --tags project=udapeople	  
+      - destroy-environment
+      - revert-migrations
+
+  cleanup:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            yum -y install jq tar gzip git curl
+      
+      - run:
+          name: Remove old stacks and files
+          command: |
+            # get old WorkFlowId            
+            export OldWorkflowID=$(curl -H "token: 105ff6c1-f3f1-4577-ae50-6cdacd934061" --request GET https://api.memstash.io/values/OldWorkflowID_${CIRCLE_WORKFLOW_ID:0:7})
+            echo $OldWorkflowID
+
+            # get all stacks
+            export STACKS=$(aws cloudformation list-stacks \
+            --query "StackSummaries[*].StackName" \
+            --stack-status-filter CREATE_COMPLETE \
+            --no-paginate --output text)
+
+            if [[ "${STACKS[@]}" =~ "${OldWorkflowID}" ]]
+            then        
+              aws s3 rm s3://udapeople-${OldWorkflowID} --recursive
+              aws cloudformation delete-stack --stack-name backend-${OldWorkflowID}
+              aws cloudformation delete-stack --stack-name frontend-${OldWorkflowID}
+            fi
+
+      - slack-notification-fail
+workflows:
+  default:
+    jobs:
+      - build-frontend:
+          context: slack-secrets
+      - build-backend:
+          context: slack-secrets
+      - test-frontend:
+          context: slack-secrets
+          requires: [build-frontend]
+      - test-backend:
+          context: slack-secrets
+          requires: [build-backend]
+      - scan-frontend:
+          context: slack-secrets
+          requires: [build-frontend]
+      - scan-backend:
+          context: slack-secrets
+          requires: [build-backend]
+      - deploy-infrastructure:
+          context: slack-secrets
+          requires:
+            - scan-backend
+            - scan-frontend
+            - test-backend
+            - test-frontend
+          filters:
+              branches:
+                only:
+                  - master
+      - configure-infrastructure:
+          context: slack-secrets
+          requires: [deploy-infrastructure]
+      - run-migrations:
+          context: slack-secrets
+          requires: [ configure-infrastructure ]
+      - deploy-backend:
+          context: slack-secrets
+          requires: [ run-migrations ]
+      - deploy-frontend:
+          context: slack-secrets
+          requires: [ deploy-backend ]
+      - smoke-test:
+          context: slack-secrets
+          requires:
+            - deploy-frontend
+            - deploy-backend
+      - cloudfront-update:
+          context: slack-secrets
+          requires: [ smoke-test ]
+      - cleanup:
+          context: slack-secrets
+          requires: [ cloudfront-update ] 
